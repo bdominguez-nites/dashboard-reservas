@@ -1459,7 +1459,8 @@ for (const b of document.querySelectorAll("nav button")) {
 
     <div style="margin-top:16px;display:flex;gap:10px">
       <button id="imp-btn-process" disabled onclick="window.impProcess()">Procesar</button>
-      <button id="imp-btn-close-ok" style="display:none;background:var(--acc);color:#fff">✓ Cerrar</button>
+      <button id="imp-btn-download" style="display:none;background:#e67e22;color:#fff;border:none;font-weight:700">⬇ Descargar index.html para publicar</button>
+      <button id="imp-btn-close-ok" style="display:none;background:var(--acc);color:#fff">✓ Cerrar (solo ver ahora)</button>
       <button id="imp-btn-cancel" onclick="if(document.getElementById('imp-btn-process').disabled && document.getElementById('imp-btn-close-ok').style.display==='none'){return;}window.impCloseAndRefresh()" style="background:transparent;border:1px solid var(--border)">Cancelar</button>
     </div>
   </div>
@@ -1889,6 +1890,7 @@ async function impProcess() {
     var nFact = resultFact.length, nCost = resultCost.length;
     setProgress(100, '✓ ' + nFact.toLocaleString() + ' reservas · ' + nCost.toLocaleString() + ' líneas costos — datos cargados en memoria');
     document.getElementById('imp-btn-close-ok').style.display = 'inline-block';
+    document.getElementById('imp-btn-download').style.display = 'inline-block';
     // Update header counter so user can confirm data is live
     var hdrCount = document.getElementById('imp-hdr-count');
     if (!hdrCount) {
@@ -1948,6 +1950,101 @@ document.getElementById('imp-btn-close-ok').addEventListener('click', window.imp
 
 // ── Expose for inline onclick handlers ──────────────────────────────────────
 window.impProcess = impProcess;
+
+
+// ── Regenerate a fully self-contained index.html with the new data ──────────
+function u8ToB64(u8) {
+  var CH = 0x8000, parts = [];
+  for (var i = 0; i < u8.length; i += CH) {
+    parts.push(String.fromCharCode.apply(null, u8.subarray(i, i + CH)));
+  }
+  return btoa(parts.join(''));
+}
+function todayStamp() {
+  var t = new Date();
+  return String(t.getDate()).padStart(2,'0') + '/' +
+         String(t.getMonth()+1).padStart(2,'0') + '/' + t.getFullYear();
+}
+window.impDownloadHtml = async function() {
+  var btn = document.getElementById('imp-btn-download');
+  function say(pct, m) { setProgress(pct, m); }
+  var yield_ = function() { return new Promise(function(r){ setTimeout(r, 0); }); };
+  try {
+    if (!resultFact || !resultCost) { alert('Primero procesá los 6 archivos.'); return; }
+    btn.disabled = true;
+
+    say(10, 'Comprimiendo facturación…');           await yield_();
+    var factB64 = u8ToB64(pako.gzip(JSON.stringify(resultFact)));
+    say(35, 'Comprimiendo costos…');                     await yield_();
+    var costB64 = u8ToB64(pako.gzip(JSON.stringify(resultCost)));
+    say(60, 'Reconstruyendo HTML…');                     await yield_();
+
+    var doc = document.documentElement.cloneNode(true);
+    var q = function(sel) { return doc.querySelector(sel); };
+    // Reset UI back to a clean logged-out state
+    if (q('#content')) q('#content').innerHTML = '';
+    if (q('#filters')) q('#filters').innerHTML = '';
+    if (q('#login'))   q('#login').classList.remove('hidden');
+    ['#hdr', '#nav', '#main'].forEach(function(s) { if (q(s)) q(s).classList.add('hidden'); });
+    if (q('#pwd')) q('#pwd').value = '';
+    if (q('#pwd-err')) q('#pwd-err').textContent = '';
+    if (q('#imp-live-badge')) q('#imp-live-badge').remove();
+    if (q('#imp-hdr-count')) q('#imp-hdr-count').remove();
+    if (q('#imp-update-btn')) q('#imp-update-btn').remove();
+    if (q('#imp-overlay')) q('#imp-overlay').classList.remove('open');
+    if (q('#imp-summary')) { q('#imp-summary').style.display = 'none'; q('#imp-summary').innerHTML = ''; }
+    if (q('#imp-progress-wrap')) q('#imp-progress-wrap').style.display = 'none';
+    if (q('#imp-btn-close-ok')) q('#imp-btn-close-ok').style.display = 'none';
+    if (q('#imp-btn-download')) { q('#imp-btn-download').style.display = 'none'; q('#imp-btn-download').disabled = false; }
+    if (q('#imp-btn-process')) q('#imp-btn-process').disabled = true;
+    for (var i = 0; i < 6; i++) {
+      var dot = q('#slot-dot-' + i), fn = q('#slot-fname-' + i);
+      if (dot) { dot.textContent = '○'; dot.className = 'slot-dot'; }
+      if (fn)  { fn.textContent = '—'; fn.className = 'slot-fname'; }
+    }
+
+    // Swap the two data blobs + the generation date inside the main script
+    var scripts = doc.querySelectorAll('script'), done = false;
+    for (var j = 0; j < scripts.length; j++) {
+      var code = scripts[j].textContent;
+      if (code.indexOf('const DATA_B64') === -1) continue;
+      code = code.replace(/const DATA_B64 = "[^"]*"/,   'const DATA_B64 = "' + factB64 + '"');
+      code = code.replace(/const COSTOS_B64 = "[^"]*"/, 'const COSTOS_B64 = "' + costB64 + '"');
+      code = code.replace(/let GEN_DATE = "[^"]*"/,     'let GEN_DATE = "' + todayStamp() + '"');
+      scripts[j].textContent = code;
+      done = true;
+      break;
+    }
+    if (!done) { say(0, '✗ No se encontró el bloque de datos.'); btn.disabled = false; return; }
+
+    say(85, 'Generando archivo…'); await yield_();
+    var out = '<!DOCTYPE html>\n' + doc.outerHTML;
+    // Safety check before handing the file over
+    if (out.indexOf('</html>') === -1 || out.length < 1000000) {
+      say(0, '✗ El HTML generado parece inválido (' + out.length + ' bytes). No se descargó.');
+      btn.disabled = false; return;
+    }
+    var mb = (out.length / 1048576).toFixed(1);
+    var blob = new Blob([out], { type: 'text/html;charset=utf-8' });
+    var a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = 'index.html';
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(function() { URL.revokeObjectURL(a.href); a.remove(); }, 8000);
+    say(100, '✓ index.html descargado (' + mb + ' MB) con ' +
+             resultFact.length.toLocaleString() + ' reservas y ' +
+             resultCost.length.toLocaleString() + ' costos.<br>' +
+             '<b>Ahora subílo a GitHub</b>: <a href="https://github.com/bdominguez-nites/dashboard-reservas/upload/main" target="_blank" style="color:#A6CE39">abrir GitHub →</a> ' +
+             'arrastrá el archivo y click en <b>Commit changes</b>.');
+    btn.disabled = false;
+  } catch (e) {
+    console.error('impDownloadHtml:', e);
+    say(0, '✗ Error al generar: ' + e.message);
+    btn.disabled = false;
+  }
+};
+document.getElementById('imp-btn-download').addEventListener('click', window.impDownloadHtml);
 
 // ── Diagnostic panel: row counts per year for the ACTIVE dataset ────────────
 window.impDiag = function() {
